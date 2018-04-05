@@ -1,0 +1,21 @@
+# g++ -c --std=c++11
+
+CC=g++
+CFLAGS=-c --std=c++11 -Wall
+
+all:
+	weeny_proxy
+
+weeny_proxy: $(CC) main.o server.o proxy.o
+
+main.o: main.cpp
+	$(CC) $(CFLAGS) main.cpp
+
+server.o: server.cpp
+	$(CC) $(CFLAGS) server.cpp
+
+proxy.o: proxy.cpp
+	$(CC) $(CFLAGS) proxy.cpp
+
+clean:
+	rm -rf *.o weeny_proxy
