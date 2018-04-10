@@ -10,3 +10,7 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <cstring>
+#include <pthread.h>
+#include <errno.h>
+#include <string>
+#include <fcntl.h>

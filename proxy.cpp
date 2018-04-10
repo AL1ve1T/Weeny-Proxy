@@ -19,29 +19,50 @@ namespace wp
             {
                 std::unordered_map<std::string, std::string> http_headers_map;
                 std::vector<std::string> http_header;
-                // std::vector<std::string> http_body;
                 std::string http_body_string;
                 std::stringstream read_stream;
 
-                char *buffer;
+                char buffer[BUFFER_SIZE];
                 int body_starts;
-                bzero(buffer, BUFFER_SIZE);
-                bool readed;
+                memset(buffer, 0, BUFFER_SIZE);
+                int is_readed = 1;
+
+                fcntl(csock, F_SETFL, O_NONBLOCK);
                 
-                while (readed)
+                while (is_readed != 0)
                 {
                     // Reads data from socket to buffer
-                    bool is_readed = recv(csock, buffer, BUFFER_SIZE, 0);
+                    try
+                    {
+                        is_readed = recv(csock, buffer, BUFFER_SIZE, 0);
+                        if (is_readed == -1 and read_stream.str().length() == 0)
+                        {
+                            std::cerr << "Cannot read from socket" << std::endl;
+                            strerror(errno);
+                            close(csock);
+                            std::terminate();
+                        }
+                    }
+                    catch (std::exception& e)
+                    {
+                        std::cerr << e.what() << std::endl;
+                        throw;
+                    }
                     if (is_readed < 0)
                     {
                         std::cerr << "Could not read from socket\nTermination.." << std::endl;
                     }
                     // Concatenate new data to existing data
                     read_stream << buffer;
-                    bzero(buffer, BUFFER_SIZE);
 
                     // Offset must be 4
                     body_starts = read_stream.str().find("\r\n\r\n") + 4;
+
+                    if (buffer[0] == 0)
+                    {
+                        break;
+                    }
+                    memset(buffer, 0, BUFFER_SIZE);
                 }
                 // Now parsing the header
                 http_body_string = read_stream.str();
@@ -56,38 +77,38 @@ namespace wp
                 #ifdef USE_IPV4
                     ///////////////////////////////////////////////////////////
                     /// Getting the first string of the request
-                    std::vector<std::string> first_str = split_string(http_header[0], " ");
+                    std::vector<std::string> first_str = split_string(http_header[1], " ");
                     // GET
-                    std::string method = first_str[0];
+                    std::string method = first_str[1];
                     // /home/test.html
-                    std::string url = first_str[1];
+                    std::string url = first_str[2];
                     // HTTP/1.1
-                    std::string protocol = first_str[2];
+                    std::string protocol = first_str[3];
 
-                    std::string host;
+                    char host[1024];
                     unsigned short port;
-                    std::string path;
+                    char path[1024];
 
                     /////////////////////////////////////////////////////////////////////
                     /// Scanning request message and collecting data for a new request
                     if (strncasecmp(url.c_str(), "http://", 7) == 0)
                     {
-                        if (std::sscanf(url.c_str(), "http://%[^:/]:%d%s", host, &port, path) == 3)
+                        if (std::sscanf(url.c_str(), "http://%[^:/]:%d%s", &host, &port, &path) == 3)
                         {
                             // Cap
                         }
-                        else if (std::sscanf(url.c_str(), "http://%[^/]%s", host, path) == 2)
+                        else if (std::sscanf(url.c_str(), "http://%[^/]%s", &host, &path) == 2)
                         {
                             port = 80;
                         }
-                        else if (std::sscanf(url.c_str(), "http://%[^:/]:%d", host, &port) == 2)
+                        else if (std::sscanf(url.c_str(), "http://%[^:/]:%d", &host, &port) == 2)
                         {
-                            path = "";
+                            *path = '\0';
                         }
-                        else if (std::sscanf(url.c_str(), "http://%[^/]", host) == 1)
+                        else if (std::sscanf(url.c_str(), "http://%[^/]", &host) == 1)
                         {
                             port = 80;
-                            path = "";
+                            *path = '\0';
                         }
                         else
                         {
@@ -97,11 +118,11 @@ namespace wp
                     }
                     else if (method == "CONNECT")
                     {
-                        if (std::sscanf(url.c_str(), "%[^:]:%d", host, &port) == 2)
+                        if (std::sscanf(url.c_str(), "%[^:]:%d", &host, &port) == 2)
                         {
                             // Cap
                         }
-                        else if (std::sscanf(url.c_str(), "%s", host) == 1)
+                        else if (std::sscanf(url.c_str(), "%s", &host) == 1)
                         {
                             port = 443;
                         }
@@ -118,14 +139,12 @@ namespace wp
                     }
                 #endif
 
-                int client_sock = open_socket(host, port);
-                FILE* read_sock = fdopen(client_sock, "r");
-                FILE* write_sock = fdopen(client_sock, "w");
+                int proxy_client = open_socket(host, port);
 
-                send_proxy_request(method.c_str(), path.c_str(), protocol.c_str(),
-                    read_sock, write_sock, http_body_string, http_headers_map);
+                send_proxy_request(method.c_str(), path, protocol.c_str(),
+                    csock, proxy_client, http_body_string, http_headers_map);
 
-                close(client_sock);
+                shutdown(proxy_client, SHUT_RDWR);
             }
             ~proxy ()
             {
@@ -135,69 +154,108 @@ namespace wp
             /// Finaly sends request from to the distant server
             /// (Most of code is writen in raw C style)
             static void send_proxy_request
-            (const char* method, const char* path, const char* protocol, FILE* read_sock, FILE* write_sock,
-                std::string http_body, std::unordered_map<std::string, std::string> http_headers_map)
+            (const char* method, const char* path, const char* protocol, 
+                int csock, int proxy_client, std::string http_body, std::unordered_map<std::string, std::string> http_headers_map)
             {
-                char _protocol[8192];
-                char comment[8192];
+                char _protocol[1024];
+                char comment[1024];
+                char http_msg[8192];
+                std::stringstream send_buffer;
+                std::stringstream recv_buffer;
 
                 int _header;
                 int connection_status;
                 int _char;
+                int bytes = 1;
                 long int content_length = -1;
                 
-                std::fprintf(write_sock, "%s %s %s\r\n", method, path, protocol);
+                //std::fprintf(buffer, "%s %s %s\r\n", method, path, protocol);
+                send_buffer << trim(method) << ' ' << trim(path) << ' ' << trim(protocol) << "\r\n";
                 
                 for (auto header : http_headers_map)
                 {
-                    fputs((header.first + ": " + header.second + "\r\n").c_str(), write_sock);
+                    send_buffer << header.first + ": " + header.second + "\r\n";
                 }
-                content_length = std::stoi(http_headers_map["Content-Length"]);
-                fputs("\r\n", write_sock);
-                fputs(http_body.c_str(), write_sock);
-                fflush(write_sock);
+                send_buffer << "\r\n" << http_body;
 
-                for (int i = 0; i < content_length && (_char = getchar()) != EOF; i++)
+                if (send(proxy_client, send_buffer.str().c_str(), strlen(send_buffer.str().c_str()), 0) == -1)
                 {
-                    putc(_char, write_sock);
+                    std::cerr << "Socket is closed" << std::endl;
+                    return;
+                    // Cannot get access to the endpoint
                 }
-                fflush(write_sock);
 
                 ////////////////////////////////////////////////////////////////
                 /// Receiving response and forward it back to the client
                 content_length = -1;
                 _header = 1;
                 connection_status = -1;
+                // Filling buffer with zeros
+                memset(http_msg, 0, sizeof(http_msg));
 
-                //TODO: Receiving data, and forwarding it to the client
+                std::string http_msg_string(http_msg);
+                
+                fcntl(proxy_client, F_SETFL, O_NONBLOCK);
+
+                while (bytes != 0)
+                {
+                    bytes = recv(proxy_client, http_msg, sizeof(http_msg), 0);
+                    recv_buffer << trim(http_msg);
+                    // content_length -= bytes;
+                    if (_header)
+                    {
+                        std::sscanf(http_msg, "%[^ ] %d %s", _protocol, &connection_status, comment);
+                        _header = 0;
+                    }
+                    if (strcasecmp(http_msg, "Content-Length:") == 0)
+                    {
+                        content_length = atol(&(http_msg[15]));
+                    }
+                    if (http_msg[0] == 0)
+                    {
+                        break;
+                    }
+
+                    memset(http_msg, 0, sizeof(http_msg));
+                }
+
+                std::cout << recv_buffer.str();
+
+                if (send(csock, recv_buffer.str().c_str(), strlen(recv_buffer.str().c_str()), 0) == -1)
+                {
+                    std::cerr << "Error occured" << std::endl;
+                }
+                shutdown(csock, SHUT_RDWR);
+                shutdown(proxy_client, SHUT_RDWR);
             }
 
             ////////////////////////////////////////////////////////////////////
             /// Opens socket for proxy request
-            static int open_socket(std::string host, unsigned short port)
+            static int open_socket(const char* host, unsigned short port)
             {
                 #ifdef USE_IPV4
                 struct hostent* _hostent;
                 struct sockaddr_in _sockaddr_in;
 
                 // Variables
-                int sockaddr_len;
+                size_t sockaddr_len;
                 int sock_family;
                 int sock_type;
                 int sock_protocol;
                 int sockfd;
 
-                _hostent = gethostbyname(host.c_str());
-                if (_hostent = (struct hostent*) 0)
+                _hostent = gethostbyname(host);
+                if (_hostent == (struct hostent*) 0)
                 {
                     // Not Found
                 }
 
-                sock_family = _sockaddr_in.sin_family = _hostent->h_addrtype;
+                _sockaddr_in.sin_family = AF_INET;
+                sock_family = AF_INET;
                 sock_type = SOCK_STREAM;
-                sock_protocol = 0;
+                sock_protocol = IPPROTO_TCP;
                 sockaddr_len = sizeof(_sockaddr_in);
-                (void*) memmove(&_sockaddr_in, _hostent->h_addr, _hostent->h_length);
+                memcpy(&_sockaddr_in.sin_addr, _hostent->h_addr, _hostent->h_length);
                 _sockaddr_in.sin_port = htons(port);
 
                 // Now create socket
@@ -208,8 +266,12 @@ namespace wp
                 }
                 if (connect(sockfd, (struct sockaddr*) &_sockaddr_in, sockaddr_len) < 0)
                 {
+                    std::cerr << strerror(errno) << std::endl;
+                    std::cerr << "Endpoint is unavailable" << std::endl;
+                    return 0;
                     // "Unavailable"
                 }
+
                 return sockfd;
 
                 #endif
@@ -226,7 +288,10 @@ namespace wp
                 while (current != std::string::npos)
                 {
                     result.push_back(http_msg.substr(previous, current - previous));
-                    previous = current + 2;
+                    if (current != 0)
+                    {
+                        previous = current + 2;
+                    }
                     current = http_msg.find("\r\n", previous);
                 }
                 result.push_back(http_msg.substr(previous, current - previous));
@@ -241,21 +306,24 @@ namespace wp
                 std::unordered_map<std::string, std::string> result;
                 size_t current = 0;
                 
-                for (auto header : http_msg)
+                for (std::string header : http_msg)
                 {
                     current = header.find(": ");
                     if (current == header.back())
                     {
                         continue;
                     }
-                    result.insert(std::make_pair(header.substr(0, current), header.substr(current + 2, header.length())));
+                    if (current != std::string::npos)
+                    {
+                        result.insert(std::make_pair(header.substr(0, current), header.substr(current + 2, header.length())));
+                    }
                     current += 2;
                 }
                 return result;
             }
             ////////////////////////////////////////////////////////////////////
             /// Just a spliter
-            static std::vector<std::string> split_string(std::string str, const char* delim)
+            static std::vector<std::string> split_string(const std::string& str, const char* delim)
             {
                 std::size_t current = 0;
                 std::size_t previous = 0;
@@ -264,10 +332,25 @@ namespace wp
                 while (current != std::string::npos)
                 {
                     result.push_back(str.substr(previous, current - previous));
-                    previous = current + strlen(delim);
+                    if (current != 0)
+                    {
+                        previous = current + strlen(delim);
+                    }
                     current = str.find(delim, previous);
                 }
                 result.push_back(str.substr(previous, current - previous));
+                return result;
+            }
+
+            static std::string trim (const char* base_str)
+            {
+                std::string result(base_str);
+                int len = result.length();
+                
+                while (result[len - 1] == '\n' || result[len - 1] == '\r')
+                {
+                    result.pop_back();
+                }
                 return result;
             }
     };
