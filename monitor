@@ -1,0 +1,7 @@
+#!/bin/bash
+
+while true;
+do
+pmap -x 12786;	#process id
+sleep 1;
+done
