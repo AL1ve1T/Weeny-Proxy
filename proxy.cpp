@@ -23,24 +23,40 @@ namespace wp
                 std::stringstream read_stream;
 
                 char buffer[BUFFER_SIZE];
-                int body_starts;
+                int body_starts = 0;
                 memset(buffer, 0, BUFFER_SIZE);
                 int is_readed = 1;
-
-                fcntl(csock, F_SETFL, O_NONBLOCK);
+                long int content_length = -1;
                 
-                while (is_readed != 0)
+                while (content_length != 0 and is_readed > 0)
                 {
                     // Reads data from socket to buffer
                     try
                     {
                         is_readed = recv(csock, buffer, BUFFER_SIZE, 0);
-                        if (is_readed == -1 and read_stream.str().length() == 0)
+                        read_stream << buffer;
+
+                        if (body_starts == 0 and is_readed > 0)
                         {
-                            std::cerr << "Cannot read from socket" << std::endl;
-                            strerror(errno);
-                            close(csock);
-                            std::terminate();
+                            body_starts = read_stream.str().find("\r\n\r\n") + 4;
+                            std::string buffer_str(buffer);
+                            http_header = http_parse_msg(buffer_str.substr(0, body_starts - 4));
+                            http_headers_map = http_make_key_value(http_header);
+                            if (http_headers_map.find("Content-Length") == http_headers_map.end())
+                            {
+                                content_length = atoi(http_headers_map["content-length"].c_str());
+                            }
+                            else
+                            {
+                                content_length = atoi(http_headers_map["Content-Length"].c_str());
+                            }
+                            content_length -= buffer_str.substr(body_starts, read_stream.str().length()).length();
+                            memset(buffer, 0, BUFFER_SIZE);
+                            continue;
+                        }
+                        if (is_readed > 0)
+                        {
+                            content_length -= is_readed;
                         }
                     }
                     catch (std::exception& e)
@@ -48,29 +64,12 @@ namespace wp
                         std::cerr << e.what() << std::endl;
                         throw;
                     }
-                    if (is_readed < 0)
-                    {
-                        std::cerr << "Could not read from socket\nTermination.." << std::endl;
-                    }
-                    // Concatenate new data to existing data
-                    read_stream << buffer;
 
-                    // Offset must be 4
-                    body_starts = read_stream.str().find("\r\n\r\n") + 4;
-
-                    if (buffer[0] == 0)
-                    {
-                        break;
-                    }
                     memset(buffer, 0, BUFFER_SIZE);
                 }
                 // Now parsing the header
                 http_body_string = read_stream.str();
-                
-                http_header = http_parse_msg(http_body_string.substr(0, body_starts - 4));
                 http_body_string.erase(0, body_starts);
-
-                http_headers_map = http_make_key_value(http_header);
 
                 ///////////////////////////////////////////////////////////////
                 /// TODO: Same implementation for IPv6
@@ -163,11 +162,12 @@ namespace wp
                 std::stringstream send_buffer;
                 std::stringstream recv_buffer;
 
+                std::vector<std::string> http_header;
+
                 int _header;
-                int connection_status;
-                int _char;
                 int bytes = 1;
                 long int content_length = -1;
+                int body_starts = 0;
                 
                 //std::fprintf(buffer, "%s %s %s\r\n", method, path, protocol);
                 send_buffer << trim(method) << ' ' << trim(path) << ' ' << trim(protocol) << "\r\n";
@@ -189,31 +189,46 @@ namespace wp
                 /// Receiving response and forward it back to the client
                 content_length = -1;
                 _header = 1;
-                connection_status = -1;
                 // Filling buffer with zeros
                 memset(http_msg, 0, sizeof(http_msg));
 
-                std::string http_msg_string(http_msg);
-                
-                fcntl(proxy_client, F_SETFL, O_NONBLOCK);
-
-                while (bytes != 0)
+                while (content_length != 0 and bytes > 0)
                 {
-                    bytes = recv(proxy_client, http_msg, sizeof(http_msg), 0);
-                    recv_buffer << trim(http_msg);
-                    // content_length -= bytes;
-                    if (_header)
+                    try
                     {
-                        std::sscanf(http_msg, "%[^ ] %d %s", _protocol, &connection_status, comment);
-                        _header = 0;
+                        bytes = recv(proxy_client, http_msg, sizeof(http_msg), 0);
+                        recv_buffer << trim(http_msg);
+
+                        if (body_starts == 0 and bytes > 0)
+                        {
+                            body_starts = recv_buffer.str().find("\r\n\r\n") + 4;
+                            std::string http_msg_str(http_msg);
+                            http_header = http_parse_msg(http_msg_str.substr(0, body_starts - 4));
+                            http_headers_map = http_make_key_value(http_header);
+                            if (http_headers_map.find("Content-Length") == http_headers_map.end())
+                            {
+                                if (http_headers_map.find("content-length") != http_headers_map.end())
+                                {
+                                    content_length = atoi(http_headers_map["content-length"].c_str());
+                                }
+                            }
+                            else
+                            {
+                                content_length = atoi(http_headers_map["Content-Length"].c_str());
+                            }
+                            content_length -= http_msg_str.substr(body_starts, recv_buffer.str().length()).length();
+                            memset(http_msg, 0, sizeof(http_msg));
+                            continue;
+                        }
+                        if (bytes > 0)
+                        {
+                            content_length -= bytes;
+                        }
                     }
-                    if (strcasecmp(http_msg, "Content-Length:") == 0)
+                    catch (std::exception& e)
                     {
-                        content_length = atol(&(http_msg[15]));
-                    }
-                    if (http_msg[0] == 0)
-                    {
-                        break;
+                        std::cerr << e.what() << std::endl;
+                        throw;
                     }
 
                     memset(http_msg, 0, sizeof(http_msg));

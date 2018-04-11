@@ -7,7 +7,6 @@
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <resolv.h>
-#include <cstdlib>
 #include <unistd.h>
 #include <cstring>
 #include <pthread.h>
